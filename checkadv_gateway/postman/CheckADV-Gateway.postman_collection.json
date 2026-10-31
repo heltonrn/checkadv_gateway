@@ -1,0 +1,391 @@
+{
+  "info": {
+    "_postman_id": "7e18c5de-2453-47b5-a973-0ccdba5897e1",
+    "name": "CheckADV Gateway",
+    "description": "Testes manuais do Gateway. Selecione o ambiente 'CheckADV Gateway - local'. O pre-request da coleção assina todas as requisições.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Assina com HMAC-SHA256 as rotas /v1 e /admin (mesmo cálculo do AssinadorHmac do gateway-contrato).",
+          "// texto = timestamp \\n METODO \\n caminho?query (como enviado) \\n hex(SHA256(corpo))",
+          "// Rotas públicas (/actuator, /webhook) não são assinadas.",
+          "const caminho = pm.variables.replaceIn(pm.request.url.getPathWithQuery());",
+          "const precisaAssinar = caminho.startsWith('/v1/') || caminho.startsWith('/admin/') || caminho === '/admin';",
+          "",
+          "if (precisaAssinar && pm.environment.get('assinar') !== 'false') {",
+          "    const keyId = pm.variables.replaceIn(pm.request.headers.get('X-Usar-Chave') || pm.environment.get('keyId') || '');",
+          "    const usaOperador = keyId === pm.environment.get('keyIdOperador');",
+          "    const nomeSegredo = usaOperador ? 'segredoOperador' : 'segredo';",
+          "    const segredo = pm.environment.get(nomeSegredo);",
+          "",
+          "    if (!pm.environment.name) {",
+          "        throw new Error('Nenhum ambiente selecionado. Escolha \"CheckADV Gateway - local\" no canto superior direito.');",
+          "    }",
+          "    if (!keyId) {",
+          "        throw new Error('Variável \"keyId\" vazia no ambiente.');",
+          "    }",
+          "    if (!segredo || segredo.startsWith('COLE_AQUI')) {",
+          "        throw new Error('Preencha o \"Current value\" da variável \"' + nomeSegredo + '\" no ambiente com o segredo gerado pelo GerarChave.');",
+          "    }",
+          "",
+          "    const ts = Math.floor(Date.now() / 1000).toString();",
+          "    const metodo = pm.request.method.toUpperCase();",
+          "    const corpo = (pm.request.body && pm.request.body.mode === 'raw')",
+          "        ? pm.variables.replaceIn(pm.request.body.raw || '')",
+          "        : '';",
+          "",
+          "    const hashCorpo = CryptoJS.SHA256(corpo).toString(CryptoJS.enc.Hex);",
+          "    const texto = ts + '\\n' + metodo + '\\n' + caminho + '\\n' + hashCorpo;",
+          "    const assinatura = 'sha256=' + CryptoJS.HmacSHA256(texto, CryptoJS.enc.Base64.parse(segredo))",
+          "        .toString(CryptoJS.enc.Hex);",
+          "",
+          "    pm.request.headers.remove('X-Usar-Chave');",
+          "    pm.request.headers.upsert({ key: 'X-Key-Id', value: keyId });",
+          "    pm.request.headers.upsert({ key: 'X-Timestamp', value: ts });",
+          "    pm.request.headers.upsert({ key: 'X-Assinatura', value: assinatura });",
+          "    console.log('Assinado', metodo, caminho, 'keyId=' + keyId);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "0 - Infra",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "Sem autenticação. Deve responder {\"status\":\"UP\"}."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1 - Autenticação",
+      "item": [
+        {
+          "name": "Chave de grupo válida (espera 501)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/contas/c-7f3a",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "contas",
+                "c-7f3a"
+              ]
+            },
+            "description": "Prova que a assinatura foi aceita: passou pelo filtro e chegou ao controller, que ainda não está implementado."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 501', () => pm.response.to.have.status(501));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Chave inexistente (espera 401)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Usar-Chave",
+                "value": "chave-inexistente"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/contas/c-7f3a",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "contas",
+                "c-7f3a"
+              ]
+            },
+            "description": "Usa um keyId que não existe no banco: o filtro recusa com 401 genérico."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Chave de grupo no /admin (espera 401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/grupos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "grupos"
+              ]
+            },
+            "description": "Chave de GRUPO não serve para rotas de OPERADOR."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2 - Envios",
+      "item": [
+        {
+          "name": "POST envio válido (espera 501)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/envios",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "envios"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contaId\": \"c-7f3a\",\n  \"referenciaExterna\": \"com-1842#1\",\n  \"destinatario\": {\n    \"telefone\": \"+5544999998888\"\n  },\n  \"template\": {\n    \"nome\": \"comunicacao_registrada\",\n    \"idioma\": \"pt_BR\",\n    \"corpo\": [\n      \"Silva & Associados\",\n      \"K7M2-9QXH\"\n    ],\n    \"botaoUrl\": \"A1B2q8Zr0kT3vYw9LmNpXc4dEe\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 501', () => pm.response.to.have.status(501));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST envio inválido (espera 400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/envios",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "envios"
+              ]
+            },
+            "description": "Telefone sem +55, referência com espaço, token curto: devolve a lista de campos inválidos.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contaId\": \"c-7f3a\",\n  \"referenciaExterna\": \"com 1\",\n  \"destinatario\": {\n    \"telefone\": \"44999998888\"\n  },\n  \"template\": {\n    \"nome\": \"comunicacao_registrada\",\n    \"idioma\": \"pt_BR\",\n    \"corpo\": [\n      \"Silva\"\n    ],\n    \"botaoUrl\": \"curto\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET por referência (espera 501)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/envios?contaId=c-7f3a&referenciaExterna=com-1842%231",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "envios"
+              ],
+              "query": [
+                {
+                  "key": "contaId",
+                  "value": "c-7f3a"
+                },
+                {
+                  "key": "referenciaExterna",
+                  "value": "com-1842%231"
+                }
+              ]
+            },
+            "description": "O # da referência vai codificado como %23, e é assim que entra na assinatura."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 501', () => pm.response.to.have.status(501));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET por id (espera 501)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/envios/0b9e2c4a-5d1f-4b7e-9a63-2f8c1d7e4a10",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "envios",
+                "0b9e2c4a-5d1f-4b7e-9a63-2f8c1d7e4a10"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 501', () => pm.response.to.have.status(501));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3 - Admin (chave de operador)",
+      "item": [
+        {
+          "name": "Listar grupos (espera 501)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Usar-Chave",
+                "value": "{{keyIdOperador}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/grupos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "grupos"
+              ]
+            },
+            "description": "Precisa de uma chave OPERADOR gerada com GerarChave e das variáveis keyIdOperador/segredoOperador."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 501', () => pm.response.to.have.status(501));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
